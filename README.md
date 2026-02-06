@@ -1,9 +1,3 @@
----
-output:
-  word_document: default
-  html_document: default
-  pdf_document: default
----
 # Constitutional AI Coding Pipeline
 
 **Researcher:** Ethan Carlson
@@ -16,7 +10,7 @@ output:
 
 ## 1. Executive Summary
 
-This project automates the legal coding of global constitutions by leveraging Large Language Models (LLMs) to transform unstructured text into a machine-readable dataset. The system navigate the highly conditional nature of constitutional surveys, ensuring that data is extracted with legal rigor, hierarchical accuracy, and a clear audit trail for human verification.
+This project automates the legal coding of global constitutions by leveraging Large Language Models (LLMs) to transform unstructured text into a machine-readable dataset. The system navigates the highly conditional nature of constitutional surveys, ensuring that data is extracted with legal rigor, hierarchical accuracy, and a clear audit trail for human verification.
 
 ## 2. System Architecture & Design Choices
 
@@ -258,4 +252,4 @@ for level in dependency_plan:
 
 ---
 
-*Last Updated: December 2025*
+*Last Updated: January 2026*
