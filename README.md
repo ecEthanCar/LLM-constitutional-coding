@@ -1,255 +1,213 @@
-# Constitutional AI Coding Pipeline
+# Constitutional LLM Analysis
 
-**Researcher:** Ethan Carlson
+Scalable LLM pipeline for analyzing constitutional text using Q&A-style questioning. Uses topological sorting for dependency scheduling and stateful context injection to handle conditional survey logic.
 
-**Supervisors:** Prof. Yun-chien Chang, Prof. Martin Wells, Tejas Ramdas
+## Overview
 
-**Project Date:** December 2025
+This project automates the extraction of structured legal data from constitutional texts. Given a constitution and a standardized codebook of 147 survey questions, the system uses LLMs to produce machine-readable codings validated against human expert annotations.
 
----
+The core challenge is that constitutional surveys are **hierarchical**: many questions are only relevant if a parent question was answered a certain way. The pipeline handles this through dependency-aware scheduling and stateful prompting.
 
-## 1. Executive Summary
+## Pipeline Architecture
 
-This project automates the legal coding of global constitutions by leveraging Large Language Models (LLMs) to transform unstructured text into a machine-readable dataset. The system navigates the highly conditional nature of constitutional surveys, ensuring that data is extracted with legal rigor, hierarchical accuracy, and a clear audit trail for human verification.
-
-## 2. System Architecture & Design Choices
-
-### Level-Based Dependency Scheduling (Topological Sort)
-
-Constitutional surveys are inherently nested. For example, questions regarding the proportion of votes needed for a constitutional amendment (`AMNDAPCT`) are only relevant if a procedure for amending exists (`AMEND`). To process these accurately, I developed a dependency-based scheduler using Kahn's algorithm for topological sorting. By processing questions in "Levels" rather than a flat list, the system ensures the model never encounters a "child" question before its "parent" prerequisite has been answered. This design specifically addresses supervisor concerns regarding accuracy in conditional categories.
-
-### Stateful Context Injection
-
-Because LLMs are typically "stateless" and treat prompts in isolation, I implemented a system to pass answers from previous levels back into the prompt for subsequent levels. As the system completes Level 0 (Root questions), it stores the answers in a "global answer context". When moving to Level 1, these previous answers are injected into the prompt as context. This allows the AI to determine if conditions—such as "Asked only if `AMEND` is answered 1"—are met before attempting to code the text.
-
-### The Inference Engine & Prompt Structure
-
-The system maintains a **Global Answer Context** (State) throughout processing. As each level completes, answers feed into the next prompt as "Previously Answered Questions".
-
-#### Prompt Engineering & Format
-
-The LLM receives a **Reasoning-First (Chain-of-Thought)** prompt designed for machine-parseable extraction:
-
-* **System Role**: Defines the persona as an expert data entry assistant restricted exclusively to the provided text
-* **Few-Shot Examples**: Includes specific single-select, multi-select, and "silence" (Not Specified) examples to calibrate LLM behavior
-* **Output Format**: Forces a two-line structure for every variable:
-
-```text
-ANALYSIS: [One sentence citing specific Article/Section]
-FINAL: [CODE]|[OPTION_NUMBER]
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  PHASE 1: Knowledge Base Construction                               │
+│  Questions.docx → [extract] → [dependencies] → [scheduler]          │
+│  Output: Questions sorted into levels [L0, L1, L2, L3]              │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  PHASE 2: Stateful LLM Execution                                    │
+│  For each constitution, process level-by-level:                     │
+│  • Inject previous answers as context                               │
+│  • Query LLM with chain-of-thought prompting                        │
+│  • Parse responses: ANALYSIS: [...] FINAL: CODE|ANSWER              │
+│  • Update state, proceed to next level                              │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  PHASE 3: Validation                                                │
+│  Compare AI outputs against human-coded ground truth                │
+│  Strict vs. Relaxed scoring (96-99 codes as convention differences) │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Model Configuration**:
+## File Structure
 
-* Model: GPT-5.1 (with GPT-4o and GPT-4o-mini as lower token usage options)
-* Temperature: 0 (for deterministic outputs)
-* Seed: 123 (for reproducibility)
+```
+├── 1_question_extraction.ipynb    # Parse codebook → structured JSON
+├── 2_extract_dependencies.py      # Map conditional logic
+├── 3_dependency_scheduler.py      # Topological sort (Kahn's algorithm)
+├── 4_llm_with_reasoning.ipynb     # Stateful LLM inference
+├── 5_validation.ipynb             # Evaluation framework
+```
 
-### "Reasoning First" Chain-of-Thought (CoT)
+## File Descriptions
 
-Purely numeric outputs are difficult for legal scholars to verify. To solve this, the prompt instructions explicitly demand a reasoning-first approach, requiring the LLM to provide a one-sentence analysis citing the specific article or section number before providing the final code. This design ensures the AI identifies evidence in the text, reduces "hallucinations," and provides the law team with a transparent audit trail.
+#### `1_question_extraction.ipynb`
+Parses the raw codebook (`.docx`) into a structured JSON database. Handles:
+- Extraction of question IDs, codes, and answer options
+- Detection of multi-select vs. single-select questions
+- Parsing of conditional phrases (e.g., "(Asked only if AMEND is answered 1)") into structured `depends_on` lists and evaluable `condition_expression` strings
+- Cleaning of text artifacts (soft hyphens, irregular whitespace)
+- Organization into thematic chunks via external config file
 
----
+**Input**: `Questions.docx`, `question_chunks.yaml`  
+**Output**: `organized_constitutional_questions.json`
 
-## 3. Workflow Pipeline & File Functions
+#### `2_extract_dependencies.py`
+Reads the organized JSON and extracts all conditional relationships into a dedicated dependency map. For each conditional question, records:
+- Parent variable(s) it depends on
+- Raw conditional text
+- Normalized condition expression
+- Any missing/broken dependency references
 
-### Phase 1: Knowledge Base Construction
+**Input**: `organized_constitutional_questions.json`  
+**Output**: `question_dependencies_*.json`, `question_dependencies_*.csv`
 
-* **Question Extraction & Organization (`1_question_extraction.ipynb`)**: Parses the raw `Questions.docx` and `question_chunks.yaml` to create a structured JSON database, handling complex artifacts like soft hyphens and multi-line instructions.
-* **Dependency Extraction (`2_extract_dependencies.py`)**: Analyzes question text for conditional phrases (e.g., "(Asked only if...)") and maps conditional questions to their parent variables to create a dependency map.
-* **Dependency Scheduling (`3_dependency_scheduler.py`)**: Sorts the entire question set into levels (Level 0, 1, 2, etc.) using a directed acyclic graph (DAG) to facilitate sequential processing.
+#### `3_dependency_scheduler.py`
+Builds a level-based processing plan using Kahn's algorithm for topological sorting. Questions are grouped into levels where:
+- **Level 0**: Root questions (no dependencies)
+- **Level 1+**: Questions whose dependencies are all satisfied by previous levels
 
-### Phase 2: AI Execution
+Also detects cycles in the dependency graph (if any exist).
 
-* **LLM Processing with State Management (`4_llm_with_reasoning.ipynb`)**: This is the core engine that iterates through each constitution level-by-level. It builds prompts with previous answers as context and parses responses using the `FINAL: CODE|ANSWER` format.
-* **Post-Processing**: A function within the notebook "flattens" the AI's reasoning and codes into standardized CSVs in Original, Dummy, and Pivot formats for analysis.
+**Input**: `organized_constitutional_questions.json`, `question_dependencies_*.json`  
+**Output**: `dependency_plan_levels_*.json` — a list of lists representing processing order
 
-### Phase 3: Evaluation & Reporting
+#### `4_llm_with_reasoning.ipynb`
+The core inference engine. For each constitution:
+1. Initializes an empty answer state
+2. Iterates through levels in order
+3. Builds prompts that include: constitutional text, questions at current level, and all previous answers as context
+4. Queries the LLM with chain-of-thought instructions requiring `ANALYSIS:` and `FINAL:` format
+5. Parses responses via regex, updates state, proceeds to next level
+6. Exports results to JSON with full reasoning traces
 
-* **Validation & QA (`5_validation.ipynb`)**: Compares AI outputs against human "Truth" data using a Hybrid Unbiased Metrics framework to prevent accuracy inflation from correctly skipped irrelevant questions.
+Also includes post-processing functions to convert JSON outputs into Original, Dummy-coded, and Pivot CSV formats.
 
-#### Hybrid Unbiased Metrics Framework
+**Input**: `organized_constitutional_questions.json`, `dependency_plan_levels_*.json`, constitutions CSV, OpenAI API key  
+**Output**: Per-constitution JSON files, aggregated CSVs
 
-**Strict Match**: Requires exact numeric agreement between human coder and AI.
+#### `5_validation.ipynb`
+Compares LLM outputs against human-coded ground truth using a hybrid metrics framework:
+- **Strict scoring**: Exact match required
+- **Relaxed scoring**: Treats codes 96–99 as equivalent to 0, distinguishing substantive errors from coding convention differences
+- **Hierarchical breakdown**: Separate metrics for Root, Conditional-Answer, and Conditional-Skip questions
 
-**Relaxed Match**: Treats codes 96–99 (Other, Unable to Determine, Not Specified, Not Applicable) as equivalent to 0 (No), distinguishing fundamental legal errors from coding convention differences.
+Generates color-coded Excel reports (Green/Yellow/Red) sorted by dependency level for supervisor review.
 
-**Current Benchmarks** (as of December 2025):
+**Input**: `subset_validation.csv` (ground truth), LLM output CSVs, `organized_constitutional_questions.json`, `dependency_plan_levels_*.json`  
+**Output**: Console metrics summary, `Constitutional_Validation_Level_Sorted.xlsx`
 
-| Category | Accuracy (Strict) | Accuracy (Relaxed) |
-|----------|------------------|-------------------|
-| **Global Metrics** | 54.81% | 63.46% |
-| **Root Questions** | 74.29% | 75.92% |
-| **Conditional: Answer** | 50.37% | 55.01% |
-| **Conditional: Skip** | 35.90% | 66.03% |
+## Current Benchmarks
 
-> **Note on Conditional: Skip**: The 66.03% Relaxed accuracy indicates that when the LLM is expected to skip a question (Code 99), it often provides a 90-series code (97 or 98) instead. This reflects the system's "Evidence Only" constraint, where the LLM prefers "Not Specified" over a logical "Not Applicable" skip.
+| Category | Strict | Relaxed |
+|----------|--------|---------|
+| Root Questions | 71.27% | 74.18% |
+| Conditional: Answer | 60.00% | 66.67% |
+| Conditional: Skip | 51.58% | 92.63% |
+| **Global** | **63.22%** | **73.01%** |
 
-The system generates color-coded Excel reports (Green/Yellow/Red) sorted by Level, allowing supervisors to perform horizontal review of AI performance across countries for the same legal concepts.
+*Strict*: Exact match required  
+*Relaxed*: Codes 96–99 (Other, Unable to Determine, Not Specified, Not Applicable) treated as equivalent to 0
 
----
+## Expected Data Format
 
-## 4. Technical Implementation Details
+**Input**: Codebook (`.docx`), question config (`.yaml`), constitutions (`.csv`)  
+**Output**: Per-constitution JSON with reasoning traces, plus CSV exports (Original, Dummy, Pivot)
 
-### Question Data Structure
+### Codebook Format (`Questions.docx`)
 
-The organized JSON database follows a structured format to support both thematic grouping and conditional logic:
+Questions follow this structure, with conditional logic in parentheses:
 
-```json
-{
-  "metadata": {
-    "total_chunks": 10,
-    "total_questions": 147,
-    "chunk_summary": {
-      ...
-      "executive_branch": {
-        "title": "Executive Branch Structure and Powers",
-        "question_count": 41,
-        "sample_codes": [
-          "EXECNUM",
-          "HOSHOG",
-          "HOSID"
-        ]
-      },
-      ...
-    }
-  }
-},
-{
-  "chunks": {
-    "executive_branch": {
-      "title": "Executive Branch Structure and Powers",
-      "description": "Executive leadership, cabinet, selection, powers",
-      "questions": [
-        {
-          "id": "v121",
-          "code": "HOGNAME",
-          "question": "What name does the constitution assign the Head of Government?",
-          "options": [
-            {
-              "number": "1",
-              "text": "President",
-              "code": null
-            },
-            {
-              "number": "2",
-              "text": "Prime Minister",
-              "code": null
-            },
-            {
-              "number": "3",
-              "text": "Chancellor",
-              "code": null
-            },
-            {
-              "number": "4",
-              "text": "Premier",
-              "code": null
-            },
-            {
-              "number": "5",
-              "text": "Chief Minister",
-              "code": null
-            },
-            {
-              "number": "96",
-              "text": "other, please specify in the comments section",
-              "code": null
-            },
-            {
-              "number": "97",
-              "text": "Unable to Determine",
-              "code": null
-            },
-            {
-              "number": "98",
-              "text": "Not Specified",
-              "code": null
-            },
-            {
-              "number": "99",
-              "text": "Not Applicable",
-              "code": null
-            }
-          ],
-          "conditional": {
-            "raw": "(Asked only if EXECNUM is answered 3, or if HOSHOG is answered 2)",
-            "depends_on": [
-              "EXECNUM",
-              "HOSHOG"
-            ],
-            "condition_expression": "EXECNUM == 3 or HOSHOG == 2"
-          },
-          "instructions": "In Ireland, the Head of Government is called the Taoiseach.  Please respond other and put Taoiseach in the comments section for Ireland.  IF THE CONSTITUTION MENTIONS A PRIME MINISTER, the Prime Minister is ALWAYS the Head of Government, no matter how strong or weak this office may appear.",
-          "multi_select": false,
-          "category": "executive_branch",
-          "order_index": 13
-        }
-      ]
-    }
-  }
-}
+```
+v70. AMEND
+Does the constitution provide for at least one procedure for amending 
+the constitution?
+1. Yes
+2. No
+98. Not Specified
+
+v71. AMNDPROP (Select all that apply)
+(Asked only if AMEND is answered 1)
+Who can propose amendments to the constitution?
+1. Head of State
+2. Head of Government
+3. Cabinet
+4. First Chamber of the Legislature
+5. Second Chamber of the Legislature
+96. Other
+97. Unable to Determine
+98. Not Specified
+99. Not Applicable
+
+v76. AMNDAPPR (Select all that apply)
+(Asked only if AMEND is answered 1)
+Who approves amendments to the constitution?
+1. Head of State
+2. Head of Government
+3. Cabinet
+4. First Chamber of the Legislature
+5. Second Chamber of the Legislature
+6. Joint session of the Legislature
+7. Referendum
+96. Other
+97. Unable to Determine
+98. Not Specified
+99. Not Applicable
+```
+
+Multi-select questions are expanded into binary dummy variables in the output (e.g., `AMNDAPPR_1`, `AMNDAPPR_2`, etc.).
+
+### Question Chunks (`question_chunks.yaml`)
+
+Groups questions into thematic categories for organized prompting:
+
+```yaml
+amendment_process:
+  title: "Constitutional Amendment Procedures"
+  codes: ["AMEND", "AMNDPROP", "AMNDAPPR", "AMNDAPCT"]
+  keywords: ["amend", "amendment", "unamendable"]
+  description: "Questions about constitutional amendment procedures"
+
+executive_branch:
+  title: "Executive Branch Structure and Powers"
+  codes: ["EXECNUM", "HOSHOG", "HOSID"]
+  keywords: ["head of state", "head of government", "president", "prime minister", "executive", "cabinet", "minister", "decree", "pardon"]
+  description: "Executive leadership, cabinet, selection, powers, and accountability"
 
 ```
 
-### Dependency Map & Topological Sort Output
+### Constitutions Input (`constitutions.csv`)
 
-The dependency extraction identifies child-parent relationships, which the scheduler then organizes into ordered levels for the AI to follow:
-
-```json
-// Topological Sort Plan
-[
-  ["HOSHOG", "AMEND", "EXECNUM", "FEDERAL"], // Level 0: Root questions
-  ["HOSNAME", "HOGNAME", "FEDSEP"],      // Level 1: Depend only on Level 0
-  ["HOSTERM", "HOGTERM"],                // Level 2: Depend on Level 0-1
-  ...
-]
-
+```csv
+content,name,country,year
+"We the People of the United States, in Order to form a more perfect Union...",United_States_1791.txt,United States,1791,
+"The Constituent Assembly affirms the Portuguese people's decision...",Portugal_1976.txt,Portugal,1976
 ```
 
-### Replication Pipeline
+## Usage
 
-To replicate results, execute scripts in this sequence:
-
-1. **`1_question_extraction.ipynb`**: Parse raw codebook into structured JSON
-2. **`2_extract_dependencies.py`**: Map conditional logic within codebook
-3. **`3_dependency_scheduler.py`**: Generate level-based processing plan
-4. **`4_llm_with_reasoning.ipynb`**: Execute stateful inference and generate JSON outputs
-5. **`5_validation.ipynb`**: Compare AI output against validation subset and generate Level_Sorted_Comparison report
-
-### Prompt Structure & State Management
-
-Each LLM prompt is dynamically constructed to include constitutional text, previous state, and strict output formatting:
-
-```python
-# State Management Logic
-answer_state = {}  # code -> answer mapping
-
-for level in dependency_plan:
-    # Build context from all previous levels
-    context = {k: v for k, v in answer_state.items()}
-    
-    # Generate prompts with context
-    prompts = create_prompts_with_context(level, context)
-    
-    # Query LLM and parse answer using regex
-    # Format: ANALYSIS: [reasoning] FINAL: CODE|ANSWER
-    new_answers = process_level(prompts)
-    
-    # Update state for next level
-    answer_state.update(new_answers)
-
+```bash
+# Execute in order:
+1_question_extraction.ipynb   # Parse codebook
+python 2_extract_dependencies.py
+python 3_dependency_scheduler.py
+4_llm_with_reasoning.ipynb    # Requires API key in "API Key.txt"
+5_validation.ipynb
 ```
 
----
+## Requirements
 
-## 5. Addressing Feedback
+```
+python >= 3.9
+openai, pandas, numpy, scikit-learn, openpyxl, mammoth, pyyaml
+```
 
-* **Order of Processing**: By sorting validation reports by "Level," supervisors can confirm prerequisites are processed before dependents.
-* **Dummification**: Multi-select variables are correctly expanded into individual binary indicators (0/1) in the Dummy format CSV, ensuring the data is ready for statistical analysis.
-* **Instructional Clarity**: Variables like `HOSTERM` and `HOSNAME` were updated to remove legacy options (1/99) and utilize precise open-ended instructions as requested.
-* **Validation Transparency**: The framework now distinguishes between fundamental errors and coding convention differences using Strict vs. Relaxed metrics.
+## Contact
 
----
-
-*Last Updated: January 2026*
+Ethan Carlson — eac263@cornell.edu
